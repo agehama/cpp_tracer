@@ -8,4 +8,4 @@ use_DynamoRIO_extension(trace_client drmgr)
 
 set_target_properties(trace_client PROPERTIES PREFIX "" SUFFIX ".dll")
 
-target_compile_features(trace_client PRIVATE cxx_std_17)
+target_compile_features(trace_client PRIVATE cxx_std_20)
