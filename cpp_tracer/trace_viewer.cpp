@@ -644,9 +644,10 @@ void Main()
 	HRESULT hr = CreateDiaDataSource_NoReg(L".\\dia_sdk\\amd64\\msdia140.dll", &diaSession.src);
 	if (FAILED(hr))
 	{
-		Logger << U"CreateDiaDataSource_NoReg failed";
+		Logger << U"CreateDiaDataSource_NoReg failed: " << GetLastError();
+		return;
 	}
-	Logger << U"test";
+
 	Optional<DWORD> processId;
 
 	uint32_t channel = 0;
@@ -717,6 +718,7 @@ void Main()
 				swprintf_s(shmName, L"Local\\bbtrace_shm_%ls", uuidStr.c_str());
 				channel = (shmName[0] << 16) + shmName[1];
 
+				Console << U"start debug " << Unicode::FromWstring(targetAppPath);
 				processId = StartDebug(targetAppPath, shmName);
 
 				//Logger << Unicode::FromWstring(shmName);
