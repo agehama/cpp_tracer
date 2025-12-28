@@ -2,125 +2,7 @@
 #include <Windows.h>
 #include <Siv3D.hpp> // Siv3D v0.6.16
 
-#pragma pack(push, 1)
-
-/////////////////////////////////////
-// Event: Client -> Viewer
-
-enum EventType : uint16_t
-{
-	BasicBlockHit,
-	ModuleAdd,
-	ModuleDelete,
-};
-
-//struct EventBasicBlockArgs
-//{
-//	EventType type, _pad;
-//	uint32_t pid;
-//	uint32_t tid;
-//	uint64_t timestamp_us;
-//	uint64_t app_pc;
-//	uint64_t count;
-//};
-
-// type == EV_BB_HIT
-struct BBEvent
-{
-	uint32_t pid;
-	uint32_t tid;
-	uint64_t timestamp_us;   // dr_get_microseconds()
-	uint64_t app_pc;  // BB先頭
-	uint64_t app_pc_end;   // 1固定でOK（集計は受信側）
-};
-
-// type == EV_MOD_ADD / EV_MOD_DEL
-struct ModEvent
-{
-	uint32_t pid;          // 発生元プロセス
-	uint64_t base;         // module base (info->start)
-	uint64_t size;         // image size
-	uint32_t path_len;     // 後続の UTF-16 パス長（文字数）
-	uint16_t pathIndex;
-	// 直後に UTF-16 のパス本体（可変長）を詰める設計でもOK
-};
-
-struct EventArgs
-{
-	uint16_t type;  // EV_*
-	uint16_t _pad;  // アライン調整（pack(1)でもBBと互換を保つ）
-
-	union
-	{
-		BBEvent bb;
-		ModEvent mod;
-	};
-};
-
-
-/////////////////////////////////////
-
-
-/////////////////////////////////////
-// Command: Viewer -> Client
-
-struct AddressRange
-{
-	uint64_t base;
-	uint64_t beginRva, endRva;
-};
-
-enum CommandType : uint16_t
-{
-	CMD_ADD_RANGES = 0,
-	CMD_CLEAR_RANGES = 1,
-};
-
-struct Command
-{
-	CommandType type;
-	uint16_t rangeCount;
-	//uint32_t reserve;
-	AddressRange ranges[8];
-};
-
-/////////////////////////////////////
-
-
-/////////////////////////////////////
-// Client, Viewer 間の共有メモリ
-
-struct RingHeader
-{
-	uint32_t capacity;
-	uint32_t writeIndex;
-	uint32_t readIndex;
-	uint32_t droppedCount;
-};
-
-struct ShmHeader
-{
-	uint32_t magic;
-	uint32_t channel;
-	uint32_t pid;
-	uint32_t eventsCapacity;
-	uint32_t commandsCapacity;
-};
-
-/////////////////////////////////////
-
-
-#pragma pack(pop)
-
-struct ShmLayout
-{
-	ShmHeader				header;
-	RingHeader				eventHeader;
-	EventArgs				eventBuffer[1 << 15];
-	RingHeader				commandHeader;
-	Command					commandBuffer[1024];
-	char					strBuffer[16384];
-};
+#include "../trace_common.hpp"
 
 struct ModuleInfo
 {
@@ -308,11 +190,30 @@ HRESULT CreateDiaDataSource_NoReg(const wchar_t* msdiaPath, IDiaDataSource** out
 	return hr;
 }
 
+// msdia140.dllを読み込んで、DiaSourceを作る
+static HRESULT CreateDiaDataSource(const wchar_t* msdiaDllPath, IDiaDataSource** outSrc)
+{
+	*outSrc = nullptr;
+	HMODULE h = LoadLibraryW(msdiaDllPath);
+	if (!h) return HRESULT_FROM_WIN32(GetLastError());
+
+	using DllGetClassObjectFn = HRESULT(WINAPI*)(REFCLSID, REFIID, LPVOID*);
+	auto getClassObject = reinterpret_cast<DllGetClassObjectFn>(
+		GetProcAddress(h, "DllGetClassObject"));
+	if (!getClassObject) { FreeLibrary(h); return E_NOINTERFACE; }
+
+	CComPtr<IClassFactory> factory;
+	HRESULT hr = getClassObject(__uuidof(DiaSource), IID_PPV_ARGS(&factory));
+	if (FAILED(hr)) { FreeLibrary(h); return hr; }
+
+	return factory->CreateInstance(nullptr, __uuidof(IDiaDataSource), (void**)outSrc);
+}
+
 struct DiaSession
 {
 	CComPtr<IDiaDataSource> src;
-	CComPtr<IDiaSession>    ses;
-	CComPtr<IDiaSymbol>     global;
+	CComPtr<IDiaSession> ses;
+	CComPtr<IDiaSymbol> global;
 };
 
 bool OpenDiaForExe(const std::wstring& exePath,
