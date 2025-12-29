@@ -1,4 +1,5 @@
-﻿#define NOGDI
+﻿#pragma once
+#define NOGDI
 #include <Windows.h>
 
 #pragma pack(push, 1)
