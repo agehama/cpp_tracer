@@ -5,6 +5,17 @@
 #include "../utility.hpp"
 #include "dia_session.hpp"
 
+struct ModuleInfo
+{
+	uint64_t baseAddr = 0;
+	uint64_t imageSize = 0;
+
+	bool inRange(uint64_t address) const
+	{
+		return baseAddr <= address && address < baseAddr + imageSize;
+	}
+};
+
 inline bool spscPop(RingHeader* h, EventArgs* buf, EventArgs& out)
 {
 	const uint32_t r = h->readIndex, w = h->writeIndex;
@@ -107,13 +118,8 @@ void Main()
 	ShmLayout* shm = nullptr;
 	HANDLE hMap = nullptr;
 
-	Optional<DWORD64> baseOpt;
-	Optional<DWORD64> sizeOpt;
+	Optional<ModuleInfo> exeModuleInfo;
 
-	HANDLE hFile;
-	HANDLE hFileMapping;
-	LPVOID pvView;
-	IMAGE_DOS_HEADER* pDosHeader;
 	uint64 readCount = 0;
 
 	bool loaded = false;
@@ -244,49 +250,55 @@ void Main()
 						SrcPos srcPosBegin = {};
 						SrcPos srcPosEnd = {};
 
-						if (baseOpt && sizeOpt && QueryLine(ses, data.app_pc, baseOpt.value(), sizeOpt.value(), srcPosBegin) && QueryLine(ses, data.app_pc_end, baseOpt.value(), sizeOpt.value(), srcPosEnd))
+						if (exeModuleInfo && 
+							exeModuleInfo.value().inRange(data.app_pc) && 
+							exeModuleInfo.value().inRange(data.app_pc_end))
 						{
-							if (Unicode::FromWstring(srcPosBegin.file).ends_with(U"\\main.cpp"))
+							if (VaToLine(ses, data.app_pc, srcPosBegin) &&
+								VaToLine(ses, data.app_pc_end, srcPosEnd))
 							{
-								if (!loaded)
+								if (Unicode::FromWstring(srcPosBegin.file).ends_with(U"\\main.cpp"))
 								{
-									const auto filepath = Unicode::FromWstring(srcPosBegin.file);
-									if (FileSystem::Exists(filepath))
+									if (!loaded)
 									{
-										TextReader reader(filepath);
-										reader.readLines(lines);
-										loaded = true;
-									}
-								}
-
-								if (srcPosBegin.line < lineCount.size())
-								{
-									//lineCount[srcPosBegin.line-1]++;
-
-									const auto beginLine = srcPosBegin.line - 1;
-									const auto endLine = srcPosEnd.line - 1;
-									//const auto key = beginLine << 16 + endLine;
-
-									auto& range = basicBlockLinesDef[beginLine];
-									//if (range.startLine != beginLine || range.endLine != endLine)
-									if (range.startLine == 0 || range.endLine == 0)
-									{
-										range.startLine = beginLine;
-										range.endLine = endLine;
-										updateLinesDef();
-
-										//topLine = static_cast<int>(beginLine) - 20;
+										const auto filepath = Unicode::FromWstring(srcPosBegin.file);
+										if (FileSystem::Exists(filepath))
+										{
+											TextReader reader(filepath);
+											reader.readLines(lines);
+											loaded = true;
+										}
 									}
 
-									lineHits.push_back(beginLine);
+									if (srcPosBegin.line < lineCount.size())
+									{
+										//lineCount[srcPosBegin.line-1]++;
 
-									/*auto& blockData = blockHit[key];
+										const auto beginLine = srcPosBegin.line - 1;
+										const auto endLine = srcPosEnd.line - 1;
+										//const auto key = beginLine << 16 + endLine;
 
-									blockData.startLine = beginLine;
-									blockData.endLine = endLine;
-									++blockData.hitCount;*/
+										auto& range = basicBlockLinesDef[beginLine];
+										//if (range.startLine != beginLine || range.endLine != endLine)
+										if (range.startLine == 0 || range.endLine == 0)
+										{
+											range.startLine = beginLine;
+											range.endLine = endLine;
+											updateLinesDef();
+
+											//topLine = static_cast<int>(beginLine) - 20;
+										}
+
+										lineHits.push_back(beginLine);
+
+										/*auto& blockData = blockHit[key];
+
+										blockData.startLine = beginLine;
+										blockData.endLine = endLine;
+										++blockData.hitCount;*/
+									}
+									Logger << U"SrcPos: " << Unicode::FromWstring(srcPosBegin.file) << U", [" << srcPosBegin.line << U", " << srcPosEnd.line << U"]";
 								}
-								Logger << U"SrcPos: " << Unicode::FromWstring(srcPosBegin.file) << U", [" << srcPosBegin.line << U", " << srcPosEnd.line << U"]";
 							}
 						}
 						else
@@ -306,12 +318,13 @@ void Main()
 
 						if (str.ends_with(std::string(".exe")))
 						{
-							auto& modInfo = moduleInfoTable[str];
-							modInfo.baseAddr = data.base;
-							modInfo.imageSize = data.size;
+							exeModuleInfo = ModuleInfo
+							{
+								.baseAddr = data.base,
+								.imageSize = data.size,
+							};
 
-							baseOpt = data.base;
-							sizeOpt = data.size;
+							ses->put_loadAddress(data.base);
 						}
 					}
 					break;
