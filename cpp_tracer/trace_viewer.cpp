@@ -163,127 +163,139 @@ void Main()
 
 	std::mutex mutex;
 
+	uint64_t outAddressRange = 0;
+	uint64_t failVaToLine = 0;
+	uint64_t outMainCpp = 0;
+	uint64_t hit = 0;
+
 	bool terminateRequest = false;
 	auto readMessage = [&]()
 		{
+			EventArgs ev;
 			while (!terminateRequest)
 			{
 				if (running)
 				{
-					// 受信（A->B）
-					EventArgs ev;
-					while (spscPop(&shm->eventHeader, shm->eventBuffer, ev))
+					if (spscPop(&shm->eventHeader, shm->eventBuffer, ev))
 					{
-						int cnt = 0;
-						if (++cnt <= 8)
+						switch (ev.type)
 						{
-							switch (ev.type)
+						case EventType::BasicBlockHit:
+						{
+							BBEvent& data = ev.bb;
+							++readCount;
+
+							/*Logger << U"BB pc=0x" << std::hex << ev.bb.app_pc
+								<< U" tid=" << std::dec << ev.bb.tid
+								<< U" ts(us)=" << ev.bb.timestamp_us;*/
+
+							SrcPos srcPosBegin = {};
+							SrcPos srcPosEnd = {};
+
+							if (exeModuleInfo &&
+								exeModuleInfo.value().inRange(data.app_pc) &&
+								exeModuleInfo.value().inRange(data.app_pc_end))
 							{
-							case EventType::BasicBlockHit:
-							{
-								BBEvent& data = ev.bb;
-								++readCount;
-
-								/*Logger << U"BB pc=0x" << std::hex << ev.bb.app_pc
-									<< U" tid=" << std::dec << ev.bb.tid
-									<< U" ts(us)=" << ev.bb.timestamp_us;*/
-
-								SrcPos srcPosBegin = {};
-								SrcPos srcPosEnd = {};
-
-								if (exeModuleInfo &&
-									exeModuleInfo.value().inRange(data.app_pc) &&
-									exeModuleInfo.value().inRange(data.app_pc_end))
+								if (VaToLine(ses, data.app_pc, srcPosBegin) &&
+									VaToLine(ses, data.app_pc_end, srcPosEnd))
 								{
-									if (VaToLine(ses, data.app_pc, srcPosBegin) &&
-										VaToLine(ses, data.app_pc_end, srcPosEnd))
+									if (Unicode::FromWstring(srcPosBegin.file).ends_with(U"\\main.cpp"))
 									{
-										if (Unicode::FromWstring(srcPosBegin.file).ends_with(U"\\main.cpp"))
+										mutex.lock();
+
+										if (!loaded)
 										{
-											mutex.lock();
-
-											if (!loaded)
+											const auto filepath = Unicode::FromWstring(srcPosBegin.file);
+											if (FileSystem::Exists(filepath))
 											{
-												const auto filepath = Unicode::FromWstring(srcPosBegin.file);
-												if (FileSystem::Exists(filepath))
-												{
-													TextReader reader(filepath);
-													reader.readLines(lines);
-													loaded = true;
-												}
+												TextReader reader(filepath);
+												reader.readLines(lines);
+												loaded = true;
 											}
-
-											if (srcPosBegin.line < lineCount.size())
-											{
-												//lineCount[srcPosBegin.line-1]++;
-
-												const auto beginLine = srcPosBegin.line - 1;
-												const auto endLine = srcPosEnd.line - 1;
-												//const auto key = beginLine << 16 + endLine;
-
-												auto& range = basicBlockLinesDef[beginLine];
-												//if (range.startLine != beginLine || range.endLine != endLine)
-												if (range.startLine == 0 || range.endLine == 0)
-												{
-													range.startLine = beginLine;
-													range.endLine = endLine;
-													updateLinesDef();
-
-													//topLine = static_cast<int>(beginLine) - 20;
-												}
-
-												lineHits.push_back(beginLine);
-												/*auto& blockData = blockHit[key];
-
-												blockData.startLine = beginLine;
-												blockData.endLine = endLine;
-												++blockData.hitCount;*/
-											}
-
-
-											mutex.unlock();
-											Logger << U"SrcPos: " << Unicode::FromWstring(srcPosBegin.file) << U", [" << srcPosBegin.line << U", " << srcPosEnd.line << U"]";
 										}
+
+										if (srcPosBegin.line < lineCount.size())
+										{
+											//lineCount[srcPosBegin.line-1]++;
+
+											const auto beginLine = srcPosBegin.line - 1;
+											const auto endLine = srcPosEnd.line - 1;
+											//const auto key = beginLine << 16 + endLine;
+
+											auto& range = basicBlockLinesDef[beginLine];
+											//if (range.startLine != beginLine || range.endLine != endLine)
+											if (range.startLine == 0 || range.endLine == 0)
+											{
+												range.startLine = beginLine;
+												range.endLine = endLine;
+												updateLinesDef();
+
+												//topLine = static_cast<int>(beginLine) - 20;
+											}
+
+											lineHits.push_back(beginLine);
+											/*auto& blockData = blockHit[key];
+
+											blockData.startLine = beginLine;
+											blockData.endLine = endLine;
+											++blockData.hitCount;*/
+										}
+
+										mutex.unlock();
+
+										++hit;
+										//Logger << U"SrcPos: " << Unicode::FromWstring(srcPosBegin.file) << U", [" << srcPosBegin.line << U", " << srcPosEnd.line << U"]";
+									}
+									else
+									{
+										++outMainCpp;
+										Logger << U"SrcPos: " << Unicode::FromWstring(srcPosBegin.file) << U", [" << srcPosBegin.line << U", " << srcPosEnd.line << U"]";
 									}
 								}
 								else
 								{
-									//Logger << U"VaToSourceLine failed: ";
+									++failVaToLine;
 								}
 							}
-							break;
-							case EventType::ModuleAdd:
+							else
 							{
-								ModEvent& data = ev.mod;
-
-								//const std::string str(&shm->strBuffer[data.pathIndex], shm->strBuffer + data.pathIndex + data.path_len);
-								const std::string str(&shm->strBuffer[data.pathIndex], data.path_len);
-								//Logger << U"module add data.pathIndex: " << data.pathIndex << U", data.path_len: " << data.path_len;
-								Logger << U"module path: " << Unicode::FromUTF8(str) << U", base: " << data.base;
-
-								if (str.ends_with(std::string(".exe")))
-								{
-									exeModuleInfo = ModuleInfo
-									{
-										.baseAddr = data.base,
-										.imageSize = data.size,
-									};
-
-									ses->put_loadAddress(data.base);
-								}
+								++outAddressRange;
 							}
-							break;
-							case EventType::ModuleDelete:
-								break;
-
-							default:
-								break;
-							};
 						}
+						break;
+						case EventType::ModuleAdd:
+						{
+							ModEvent& data = ev.mod;
+
+							//const std::string str(&shm->strBuffer[data.pathIndex], shm->strBuffer + data.pathIndex + data.path_len);
+							const std::string str(&shm->strBuffer[data.pathIndex], data.path_len);
+							//Logger << U"module add data.pathIndex: " << data.pathIndex << U", data.path_len: " << data.path_len;
+							//Logger << U"module path: " << Unicode::FromUTF8(str) << U", base: " << data.base;
+
+							if (str.ends_with(std::string(".exe")))
+							{
+								exeModuleInfo = ModuleInfo
+								{
+									.baseAddr = data.base,
+									.imageSize = data.size,
+								};
+
+								ses->put_loadAddress(data.base);
+							}
+						}
+						break;
+						case EventType::ModuleDelete:
+							break;
+
+						default:
+							break;
+						};
 					}
 
+					/*
 					// 非ブロッキング入力（簡易版）
-					if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
+					if (GetAsyncKeyState(VK_RETURN) & 0x8000)
+					{
 						// Enter を押したら行入力
 						std::string line;
 						std::cout << "> ";
@@ -330,14 +342,17 @@ void Main()
 							Logger << U"unknown cmd";
 						}
 					}
+					*/
 				}
 
-				//std::this_thread::sleep_for(std::chrono::milliseconds(0));
+				std::this_thread::sleep_for(std::chrono::milliseconds(0));
 			}
 		}
 	;
 
 	std::thread readMessageThread(readMessage);
+
+	Font font2(12);
 
 	while (System::Update())
 	{
@@ -404,11 +419,6 @@ void Main()
 			Logger << U"eventHeader dropped : " << shm->eventHeader.droppedCount;
 			Logger << U"commandHeader dropped: " << shm->commandHeader.droppedCount;
 			Logger << U"readCount: " << readCount;
-		}
-
-		if (shm && 0 < shm->eventHeader.droppedCount)
-		{
-			Window::SetTitle(shm->eventHeader.droppedCount);
 		}
 
 		topLine += Mouse::Wheel();
@@ -514,6 +524,21 @@ void Main()
 
 			Rect(20, 20).setCenter(x, 10).draw(Color(230));
 			font(xi * 10).drawAt(x, 10, Palette::Black);
+		}
+
+		if (KeySpace.pressed())
+		{
+			int y = 0;
+			font2(U"readCount       : {}"_fmt(readCount)).draw(0, 20 * y++, Palette::Black);
+			font2(U"outAddressRange : {}"_fmt(outAddressRange)).draw(0, 20 * y++, Palette::Black);
+			font2(U"failVaToLine    : {}"_fmt(failVaToLine)).draw(0, 20 * y++, Palette::Black);
+			font2(U"outMainCpp      : {}"_fmt(outMainCpp)).draw(0, 20 * y++, Palette::Black);
+			font2(U"hit             : {}"_fmt(hit)).draw(0, 20 * y++, Palette::Black);
+
+			if (shm)
+			{
+				font2(U"droppedCount    : {}"_fmt(shm->eventHeader.droppedCount)).draw(0, 20 * y++, Palette::Black);
+			}
 		}
 	}
 

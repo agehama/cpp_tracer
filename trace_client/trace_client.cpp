@@ -49,9 +49,6 @@ static HANDLE g_hMap = nullptr;
 static HANDLE g_evt_a2b = nullptr; // DR→Viewer
 static HANDLE g_evt_b2a = nullptr; // Viewer→DR
 
-static std::atomic<uint32_t> g_range_count{0};
-static AddressRange g_ranges[256];
-
 static void ipc_init(const wchar_t* channelNameOpt)
 {
     const uint32_t pid = dr_get_process_id();
@@ -85,46 +82,20 @@ static void ipc_close() {
     if (g_hMap)    { CloseHandle(g_hMap);     g_hMap = nullptr; }
 }
 
-// ====== フィルタ判定（行→addr範囲はビューアで解決済み前提） ======
-static bool should_instrument(app_pc pc) {
-    uint32_t n = g_range_count.load(std::memory_order_acquire);
-    if (n == 0) return true; // 指定が無ければ全BB
-    uint64_t addr = (uint64_t)pc;
-    for (uint32_t i = 0; i < n; ++i) {
-        uint64_t b = g_ranges[i].base + g_ranges[i].beginRva;
-        uint64_t e = g_ranges[i].base + g_ranges[i].endRva;
-        if (b <= addr && addr < e) return true;
-    }
-    return false;
-}
-
-// ====== コマンド受信スレッド ======
 static void apply_command(const Command& c)
 {
-    if (c.type == CMD_CLEAR_RANGES) {
-        g_range_count.store(0, std::memory_order_release);
-        return;
-    }
-    if (c.type == CMD_ADD_RANGES) {
-        uint32_t cur = g_range_count.load();
-        uint32_t add = c.rangeCount;
-        if (add > 8) add = 8;
-        uint32_t cap = (uint32_t)(sizeof(g_ranges)/sizeof(g_ranges[0]));
-        uint32_t can = (cur + add <= cap) ? add : (cap - cur);
-        for (uint32_t i = 0; i < can; ++i)
-            g_ranges[cur + i] = c.ranges[i];
-        g_range_count.store(cur + can, std::memory_order_release);
-        return;
-    }
 }
 
-// コマンド受信ループは Wait をやめて軽ポーリング
-static void cmd_loop(void*) {
-    for (;;) {
+static void cmd_loop(void*)
+{
+    for (;;)
+    {
         Command c;
         while (g_shm && spsc_pop(&g_shm->commandHeader, g_shm->commandBuffer, c))
+        {
             apply_command(c);
-        dr_sleep(10); // 10ms 程度のポーリングで十分
+        }
+        dr_sleep(10);
     }
 }
 
